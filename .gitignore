@@ -1,0 +1,9 @@
+/toit
+GEMINI.md
+.gemini/
+.packages/
+.antigravitycli/
+CLAUDE.md
+/docs
+/refs
+/tests
