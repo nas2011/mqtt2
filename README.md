@@ -15,17 +15,7 @@ A memory-efficient, fully asynchronous MQTT 5.0 client for the Toit ecosystem, d
 - **Observability** — `ClientMetrics` for runtime statistics; `MqttLogTarget` to forward structured logs to the broker
 - **TLS** — `SocketTransport.connect-tls` for encrypted connections
 
-## Installation
 
-Add to your `package.yaml`:
-
-```yaml
-dependencies:
-  mqtt2:
-    path: . # replace with published registry reference when available
-```
-
-Then run `toit pkg install`.
 
 ## Quick Start
 
