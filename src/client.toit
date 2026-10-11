@@ -240,6 +240,7 @@ class Client:
 
   read-task_/Task? := null
   writer-task_/Task? := null
+  keep-alive-task_/Task? := null
   pingresp-latch_/monitor.Latch? := null
 
   // In-flight state
@@ -372,12 +373,14 @@ class Client:
     in-flight-semaphore_ = monitor.Semaphore --count=session.receive-maximum
 
     actual-keep-alive := session.server-keep-alive != null ? session.server-keep-alive : options_.keep-alive
+    keep-alive-interval-s_ = actual-keep-alive > 0 ? min actual-keep-alive MAX-KEEP-ALIVE-S_ : 0
     if actual-keep-alive > 0:
-      keep-alive-interval-s_ = min actual-keep-alive MAX-KEEP-ALIVE-S_
       if logger_: logger_.debug "keep-alive: interval=$keep-alive-interval-s_ s" --tags={"negotiated": actual-keep-alive}
 
     writer-task_ = task --background:: writer-loop_
     read-task_ = task --background:: read-loop_
+    if keep-alive-interval-s_ > 0:
+      keep-alive-task_ = task --background:: keep-alive-loop_
 
   write_ packet/Packet -> none:
     if not is-connected: throw "NOT_CONNECTED"
@@ -402,35 +405,11 @@ class Client:
         return
 
   read-loop_ -> none:
-    keep-alive-ms := keep-alive-interval-s_ * 1000
     while is-connected:
       packet/Packet? := null
 
       exception := catch:
-        if keep-alive-ms > 0:
-          with-timeout --ms=keep-alive-ms:
-            packet = transport_.read
-        else:
-          packet = transport_.read
-
-      if exception == DEADLINE-EXCEEDED-ERROR:
-        if not pingresp-latch_:
-          if logger_: logger_.debug "keep-alive: sending PINGREQ"
-          ping-ex := catch:
-            write_ PingreqPacket
-          if ping-ex:
-            if is-connected: close
-            return
-          latch := monitor.Latch
-          pingresp-latch_ = latch
-          task --background::
-            ex := catch:
-              with-timeout --ms=keep-alive-ms:
-                latch.get
-            if ex == DEADLINE-EXCEEDED-ERROR:
-              if logger_: logger_.warn "keep-alive: no PINGRESP within deadline, closing"
-              if is-connected: close
-        continue
+        packet = transport_.read
 
       if exception:
         if logger_: logger_.warn "read-loop: read failed ($exception), closing"
@@ -443,6 +422,30 @@ class Client:
         return
 
       handle-packet_ packet
+
+  keep-alive-loop_ -> none:
+    keep-alive-ms := keep-alive-interval-s_ * 1000
+    while is-connected:
+      sleep --ms=keep-alive-ms
+      if not is-connected: return
+
+      latch := monitor.Latch
+      pingresp-latch_ = latch
+      if logger_: logger_.debug "keep-alive: sending PINGREQ"
+      ping-ex := catch:
+        write_ PingreqPacket
+      if ping-ex:
+        if is-connected: close
+        return
+
+      response-error := catch:
+        with-timeout --ms=keep-alive-ms:
+          latch.get
+      if response-error:
+        if response-error == DEADLINE-EXCEEDED-ERROR and logger_:
+          logger_.warn "keep-alive: no PINGRESP within deadline, closing"
+        if is-connected: close
+        return
 
   handle-packet_ packet/Packet -> none:
     if packet is PingrespPacket:
@@ -1035,6 +1038,10 @@ class Client:
       writer-task_.cancel
       writer-task_ = null
 
+    if keep-alive-task_:
+      keep-alive-task_.cancel
+      keep-alive-task_ = null
+
   // Graceful close: stops any active reconnect loop, tears down the connection,
   // then fires on-disconnected. Never triggers a new reconnect loop.
   close-gracefully_ -> none:
@@ -1051,6 +1058,9 @@ class Client:
       if writer-task_:
         writer-task_.cancel
         writer-task_ = null
+      if keep-alive-task_:
+        keep-alive-task_.cancel
+        keep-alive-task_ = null
     state_ = STATE-DISCONNECTED
     if on-disconnected: on-disconnected.call
 
